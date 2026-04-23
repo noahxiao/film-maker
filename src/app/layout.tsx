@@ -13,8 +13,9 @@ const geistMono = Geist_Mono({
 });
 
 export const metadata: Metadata = {
-  title: "Film Maker",
-  description: "A Next.js workspace for planning and producing films.",
+  title: "Seedance 2.0 Creator | Film Maker",
+  description:
+    "A Next.js creator workspace for asset-referenced AI video generation.",
 };
 
 export default function RootLayout({

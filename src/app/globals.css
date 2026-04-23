@@ -2,8 +2,8 @@
 @import "@heroui/styles";
 
 :root {
-  --background: #f7f5f0;
-  --foreground: #18130f;
+  --background: #f4f5f6;
+  --foreground: #15171a;
 }
 
 @theme inline {
@@ -20,8 +20,8 @@ body {
 }
 
 html.light {
-  --background: #f7f5f0 !important;
-  --foreground: #18130f !important;
+  --background: #f4f5f6 !important;
+  --foreground: #15171a !important;
   color-scheme: light;
 }
 
