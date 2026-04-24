@@ -1,10 +1,14 @@
-import { put } from "@vercel/blob";
 import {
   experimental_generateVideo as generateVideo,
   gateway,
   type JSONValue,
 } from "ai";
 import { NextResponse } from "next/server";
+import {
+  createStorageKey,
+  getMissingR2Env,
+  uploadObjectToR2,
+} from "@/lib/storage/r2";
 
 export const runtime = "nodejs";
 export const maxDuration = 600;
@@ -23,9 +27,15 @@ type Settings = {
 type UploadedReference = {
   handle: string;
   kind: AssetKind;
+  key: string;
   url: string;
   downloadUrl: string;
   contentType: string;
+};
+type StorageScope = {
+  tenantId: string;
+  userId: string;
+  folder: string;
 };
 type ProviderJsonObject = Record<string, JSONValue | undefined>;
 
@@ -98,6 +108,16 @@ function parseSettings(value: FormDataEntryValue | null): Settings {
   }
 }
 
+function getStringValue(
+  formData: FormData,
+  key: string,
+  fallback: string,
+): string {
+  const value = formData.get(key);
+  if (typeof value !== "string" || value.trim().length === 0) return fallback;
+  return value.trim();
+}
+
 function getKind(file: File): AssetKind | null {
   if (file.type.startsWith("image/")) return "image";
   if (file.type.startsWith("video/")) return "video";
@@ -147,7 +167,12 @@ function hasGatewayAuth() {
   );
 }
 
-async function uploadReference(file: File, handle: string, index: number) {
+async function uploadReference(
+  file: File,
+  handle: string,
+  index: number,
+  scope: StorageScope,
+) {
   const kind = getKind(file);
   if (!kind) {
     throw new Error(`${file.name} is not an image, video, or audio file.`);
@@ -157,24 +182,25 @@ async function uploadReference(file: File, handle: string, index: number) {
     throw new Error(`${file.name} exceeds the 50 MB per-file limit.`);
   }
 
-  const pathname = [
-    "film-maker",
-    "references",
-    new Date().toISOString().slice(0, 10),
-    `${Date.now()}-${index}-${sanitizePathSegment(file.name)}`,
-  ].join("/");
-  const blob = await put(pathname, file, {
-    access: "public",
-    addRandomSuffix: true,
-    contentType: file.type || "application/octet-stream",
+  const contentType = file.type || "application/octet-stream";
+  const key = createStorageKey({
+    ...scope,
+    area: "references",
+    filename: `${index}-${sanitizePathSegment(file.name)}`,
+  });
+  const object = await uploadObjectToR2({
+    key,
+    body: Buffer.from(await file.arrayBuffer()),
+    contentType,
   });
 
   return {
     handle,
     kind,
-    url: blob.url,
-    downloadUrl: blob.downloadUrl,
-    contentType: blob.contentType,
+    key: object.key,
+    url: object.url,
+    downloadUrl: object.downloadUrl,
+    contentType: object.contentType,
   } satisfies UploadedReference;
 }
 
@@ -196,6 +222,11 @@ export async function POST(request: Request) {
     .getAll("handles")
     .map((value) => String(value || "").trim())
     .filter(Boolean);
+  const scope = {
+    tenantId: getStringValue(formData, "tenantId", "demo-tenant"),
+    userId: getStringValue(formData, "userId", "demo-user"),
+    folder: getStringValue(formData, "folder", "default"),
+  } satisfies StorageScope;
 
   if (prompt.length === 0) {
     return failed("Prompt is required.");
@@ -215,16 +246,22 @@ export async function POST(request: Request) {
     );
   }
 
-  if (!process.env.BLOB_READ_WRITE_TOKEN) {
+  const missingR2Env = getMissingR2Env();
+  if (missingR2Env.length > 0) {
     return setupNeeded(
-      "Connect Vercel Blob first. Add BLOB_READ_WRITE_TOKEN so uploaded references can be hosted as public URLs.",
+      `Connect Cloudflare R2 first. Missing: ${missingR2Env.join(", ")}.`,
     );
   }
 
   try {
     const uploadedReferences = await Promise.all(
       files.map((file, index) =>
-        uploadReference(file, handles[index] || `Asset${index + 1}`, index),
+        uploadReference(
+          file,
+          handles[index] || `Asset${index + 1}`,
+          index,
+          scope,
+        ),
       ),
     );
     const imageReferences = uploadedReferences.filter(
@@ -282,25 +319,27 @@ export async function POST(request: Request) {
     }
 
     const extension = video.mediaType.includes("webm") ? "webm" : "mp4";
-    const output = await put(
-      `film-maker/outputs/${crypto.randomUUID()}.${extension}`,
-      Buffer.from(video.uint8Array),
-      {
-        access: "public",
-        addRandomSuffix: false,
-        contentType: video.mediaType || "video/mp4",
-      },
-    );
+    const output = await uploadObjectToR2({
+      key: createStorageKey({
+        ...scope,
+        area: "outputs",
+        filename: `seedance-output.${extension}`,
+      }),
+      body: Buffer.from(video.uint8Array),
+      contentType: video.mediaType || "video/mp4",
+    });
 
     return NextResponse.json({
       status: "ready",
       model: settings.model,
       videoUrl: output.url,
       downloadUrl: output.downloadUrl,
+      storageKey: output.key,
       sourceImageUrl: sourceImage.url,
       uploadedReferences: uploadedReferences.map((reference) => ({
         handle: reference.handle,
         kind: reference.kind,
+        key: reference.key,
         url: reference.url,
       })),
       warnings: result.warnings,

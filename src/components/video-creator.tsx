@@ -55,6 +55,7 @@ type GenerationResponse = {
 type UploadedReference = {
   handle: string;
   kind: AssetKind;
+  key?: string;
   url: string;
 };
 
@@ -67,6 +68,12 @@ type Settings = {
   cameraFixed: boolean;
 };
 
+type StorageScope = {
+  tenantId: string;
+  userId: string;
+  folder: string;
+};
+
 const defaultSettings: Settings = {
   model: "bytedance/seedance-2.0",
   aspectRatio: "16:9",
@@ -74,6 +81,12 @@ const defaultSettings: Settings = {
   duration: 8,
   generateAudio: true,
   cameraFixed: false,
+};
+
+const defaultStorageScope: StorageScope = {
+  tenantId: "demo-tenant",
+  userId: "demo-user",
+  folder: "default",
 };
 
 const kindMeta = {
@@ -159,6 +172,8 @@ export function VideoCreator() {
   );
   const [prompt, setPrompt] = useState("");
   const [settings, setSettings] = useState<Settings>(defaultSettings);
+  const [storageScope, setStorageScope] =
+    useState<StorageScope>(defaultStorageScope);
   const [status, setStatus] = useState<JobStatus>("idle");
   const [message, setMessage] = useState("");
   const [videoUrl, setVideoUrl] = useState<string | null>(null);
@@ -359,6 +374,9 @@ export function VideoCreator() {
       const formData = new FormData();
       formData.set("prompt", prompt);
       formData.set("settings", JSON.stringify(settings));
+      formData.set("tenantId", storageScope.tenantId);
+      formData.set("userId", storageScope.userId);
+      formData.set("folder", storageScope.folder);
 
       references.forEach((asset) => {
         formData.append("files", asset.file, asset.name);
@@ -379,7 +397,7 @@ export function VideoCreator() {
 
       if (data.status === "setup-needed") {
         setStatus("setup-needed");
-        setMessage(data.message ?? "Connect AI Gateway and Vercel Blob.");
+        setMessage(data.message ?? "Connect AI Gateway and Cloudflare R2.");
         return;
       }
 
@@ -430,7 +448,7 @@ export function VideoCreator() {
               AI Gateway
             </Chip>
             <Chip color="success" variant="soft">
-              Vercel Blob
+              Cloudflare R2
             </Chip>
           </div>
         </div>
@@ -746,6 +764,56 @@ export function VideoCreator() {
                   />
                   Fixed camera
                 </label>
+
+                <div className="grid gap-3 border-t border-black/10 pt-3 sm:col-span-2">
+                  <label className="space-y-1">
+                    <span className="text-xs font-semibold uppercase tracking-[0.18em] text-black/45">
+                      Tenant
+                    </span>
+                    <input
+                      value={storageScope.tenantId}
+                      onChange={(event) =>
+                        setStorageScope((current) => ({
+                          ...current,
+                          tenantId: event.target.value,
+                        }))
+                      }
+                      className="h-10 w-full rounded-md border border-black/10 bg-white px-3 text-sm outline-none focus:border-[#5b7cfa]"
+                    />
+                  </label>
+
+                  <label className="space-y-1">
+                    <span className="text-xs font-semibold uppercase tracking-[0.18em] text-black/45">
+                      User
+                    </span>
+                    <input
+                      value={storageScope.userId}
+                      onChange={(event) =>
+                        setStorageScope((current) => ({
+                          ...current,
+                          userId: event.target.value,
+                        }))
+                      }
+                      className="h-10 w-full rounded-md border border-black/10 bg-white px-3 text-sm outline-none focus:border-[#5b7cfa]"
+                    />
+                  </label>
+
+                  <label className="space-y-1">
+                    <span className="text-xs font-semibold uppercase tracking-[0.18em] text-black/45">
+                      Folder
+                    </span>
+                    <input
+                      value={storageScope.folder}
+                      onChange={(event) =>
+                        setStorageScope((current) => ({
+                          ...current,
+                          folder: event.target.value,
+                        }))
+                      }
+                      className="h-10 w-full rounded-md border border-black/10 bg-white px-3 text-sm outline-none focus:border-[#5b7cfa]"
+                    />
+                  </label>
+                </div>
               </Card.Content>
             </Card>
 
@@ -873,9 +941,10 @@ export function VideoCreator() {
                       href={reference.url}
                       target="_blank"
                       rel="noreferrer"
+                      title={reference.key ?? reference.url}
                       className="block truncate font-mono text-xs text-[#4a62d8] hover:underline"
                     >
-                      @{reference.handle}
+                      {reference.key ?? `@${reference.handle}`}
                     </a>
                   ))}
                 </div>
