@@ -1,5 +1,5 @@
 import type { Metadata } from "next";
-import { Geist, Geist_Mono } from "next/font/google";
+import { Fraunces, Geist, Geist_Mono } from "next/font/google";
 import "./globals.css";
 
 const geistSans = Geist({
@@ -12,10 +12,15 @@ const geistMono = Geist_Mono({
   subsets: ["latin"],
 });
 
+const fraunces = Fraunces({
+  variable: "--font-fraunces",
+  subsets: ["latin"],
+  axes: ["opsz", "SOFT"],
+});
+
 export const metadata: Metadata = {
-  title: "Seedance 2.0 Creator | Film Maker",
-  description:
-    "A Next.js creator workspace for asset-referenced AI video generation.",
+  title: "Film Maker — Seedance Studio",
+  description: "A quiet studio for asset-referenced AI video generation.",
 };
 
 export default function RootLayout({
@@ -26,7 +31,7 @@ export default function RootLayout({
   return (
     <html
       lang="en"
-      className={`${geistSans.variable} ${geistMono.variable} light h-full antialiased`}
+      className={`${geistSans.variable} ${geistMono.variable} ${fraunces.variable} light h-full antialiased`}
     >
       <body className="min-h-full flex flex-col">{children}</body>
     </html>

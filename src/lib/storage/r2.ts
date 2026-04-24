@@ -1,4 +1,8 @@
-import { PutObjectCommand, S3Client } from "@aws-sdk/client-s3";
+import {
+  DeleteObjectCommand,
+  PutObjectCommand,
+  S3Client,
+} from "@aws-sdk/client-s3";
 
 type StorageArea = "references" | "outputs";
 
@@ -131,6 +135,15 @@ export function createStorageKey({
   ];
 
   return segments.join("/");
+}
+
+export async function deleteObjectFromR2(key: string) {
+  await getR2Client().send(
+    new DeleteObjectCommand({
+      Bucket: process.env.R2_BUCKET_NAME,
+      Key: key,
+    }),
+  );
 }
 
 export async function uploadObjectToR2({
