@@ -1,6 +1,11 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useState } from "react";
+import {
+  defaultVideoSettings,
+  sanitizeVideoSettings,
+  type VideoSettings,
+} from "@/lib/video-options";
 
 export type AssetKind = "image" | "video" | "audio";
 
@@ -24,19 +29,14 @@ export type Generation = {
   message?: string;
   videoUrl?: string;
   downloadUrl?: string;
+  mediaType?: string;
   sourceImageUrl?: string;
   model?: string;
   createdAt: number;
+  completedAt?: number;
 };
 
-export type Settings = {
-  model: "bytedance/seedance-2.0" | "bytedance/seedance-2.0-fast";
-  aspectRatio: "16:9" | "9:16" | "1:1" | "4:3" | "3:4";
-  resolution: "480p" | "720p" | "1080p";
-  duration: number;
-  generateAudio: boolean;
-  cameraFixed: boolean;
-};
+export type Settings = VideoSettings;
 
 export type Project = {
   id: string;
@@ -48,14 +48,7 @@ export type Project = {
   settings: Settings;
 };
 
-export const defaultSettings: Settings = {
-  model: "bytedance/seedance-2.0",
-  aspectRatio: "16:9",
-  resolution: "720p",
-  duration: 8,
-  generateAudio: true,
-  cameraFixed: false,
-};
+export const defaultSettings: Settings = defaultVideoSettings;
 
 const STORAGE_KEY = "film-maker.projects.v1";
 const ACTIVE_KEY = "film-maker.active-project.v1";
@@ -109,7 +102,10 @@ function load(): { projects: Project[]; activeId: string | null } {
     const raw = window.localStorage.getItem(STORAGE_KEY);
     const active = window.localStorage.getItem(ACTIVE_KEY);
     if (!raw) return { projects: [], activeId: active };
-    const projects = JSON.parse(raw) as Project[];
+    const projects = (JSON.parse(raw) as Project[]).map((project) => ({
+      ...project,
+      settings: sanitizeVideoSettings(project.settings),
+    }));
     return { projects, activeId: active };
   } catch {
     return { projects: [], activeId: null };

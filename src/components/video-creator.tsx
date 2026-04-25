@@ -3,7 +3,9 @@
 import {
   ArrowUp,
   AtSign,
+  Check,
   Clapperboard,
+  Copy,
   Download,
   Film,
   Image as ImageIcon,
@@ -13,6 +15,7 @@ import {
   Plus,
   Settings2,
   Sparkles,
+  Timer,
   Trash2,
   Video as VideoIcon,
   X,
@@ -35,6 +38,15 @@ import {
   type Settings,
   useProjects,
 } from "@/lib/projects";
+import {
+  formatSeedanceAspectRatio,
+  formatSeedanceDuration,
+  getSeedanceResolutionOptions,
+  sanitizeVideoSettings,
+  seedanceAspectRatioOptions,
+  seedanceDuration,
+  seedanceModelOptions,
+} from "@/lib/video-options";
 
 type UploadItem = {
   id: string;
@@ -72,6 +84,21 @@ function formatBytes(bytes: number) {
 
 function baseName(name: string) {
   return name.replace(/\.[^/.]+$/, "");
+}
+
+function promptWantsReference(prompt: string) {
+  return /\b(this|that|these|those|image|photo|picture|frame|attachment|asset|reference|video|clip|based on|from)\b/i.test(
+    prompt,
+  );
+}
+
+function latestImplicitReference(assets: ProjectAsset[]) {
+  const sorted = [...assets].sort((a, b) => b.createdAt - a.createdAt);
+  return (
+    sorted.find((asset) => asset.kind === "image") ??
+    sorted.find((asset) => asset.kind === "video") ??
+    null
+  );
 }
 
 function suggestHandle(name: string, kind: AssetKind, existing: Set<string>) {
@@ -114,6 +141,16 @@ function formatDateShort(ts: number) {
   if (diff < 3600) return `${Math.floor(diff / 60)}m ago`;
   if (diff < 86400) return `${Math.floor(diff / 3600)}h ago`;
   return d.toLocaleDateString([], { month: "short", day: "numeric" });
+}
+
+function formatDuration(ms: number) {
+  if (!Number.isFinite(ms) || ms < 0) return "—";
+  const seconds = ms / 1000;
+  if (seconds < 10) return `${seconds.toFixed(1)}s`;
+  if (seconds < 60) return `${Math.round(seconds)}s`;
+  const m = Math.floor(seconds / 60);
+  const s = Math.round(seconds % 60);
+  return s === 0 ? `${m}m` : `${m}m ${s}s`;
 }
 
 export function VideoCreator() {
@@ -195,6 +232,21 @@ function Workspace({
       assets.filter((asset) => mentionSet.has(asset.handle.toLowerCase())),
     [assets, mentionSet],
   );
+  const implicitReference = useMemo(() => {
+    if (referencedAssets.length > 0 || !promptWantsReference(prompt)) {
+      return null;
+    }
+    return latestImplicitReference(assets);
+  }, [assets, prompt, referencedAssets.length]);
+  const generationReferences = useMemo(
+    () =>
+      referencedAssets.length > 0
+        ? referencedAssets
+        : implicitReference
+          ? [implicitReference]
+          : [],
+    [implicitReference, referencedAssets],
+  );
 
   const activeAssetKeys = useMemo(
     () => new Set(assets.map((a) => a.key ?? a.url)),
@@ -218,16 +270,17 @@ function Workspace({
       .slice(0, 6);
   }, [assets, mentionQuery]);
 
-  const canGenerate =
-    prompt.trim().length > 0 &&
-    referencedAssets.some((a) => a.kind === "image") &&
-    !generating;
+  const canGenerate = prompt.trim().length > 0 && !generating;
 
-  const hintNeedsImage =
-    prompt.trim().length > 0 &&
-    !generating &&
-    !referencedAssets.some((a) => a.kind === "image") &&
-    assets.some((a) => a.kind === "image");
+  const generationHint =
+    prompt.trim().length > 0 && !generating && implicitReference
+      ? `Using @${implicitReference.handle} automatically`
+      : prompt.trim().length > 0 &&
+          !generating &&
+          assets.length > 0 &&
+          referencedAssets.length === 0
+        ? "Text-to-video · type @ to use an attachment"
+        : null;
 
   const startUpload = useCallback(
     async (files: File[]) => {
@@ -449,14 +502,17 @@ function Workspace({
   };
 
   const updateSettings = (partial: Partial<Settings>) => {
-    updateActive((p) => ({ ...p, settings: { ...p.settings, ...partial } }));
+    updateActive((p) => ({
+      ...p,
+      settings: sanitizeVideoSettings({ ...p.settings, ...partial }),
+    }));
   };
 
   const generate = async () => {
     if (!canGenerate) return;
     const id = crypto.randomUUID();
     const captured = prompt.trim();
-    const refs = referencedAssets;
+    const refs = generationReferences;
     const generation: Generation = {
       id,
       prompt: captured,
@@ -502,8 +558,10 @@ function Workspace({
                   status: "ready",
                   videoUrl: data.videoUrl,
                   downloadUrl: data.downloadUrl,
+                  mediaType: data.mediaType,
                   sourceImageUrl: data.sourceImageUrl,
                   model: data.model,
+                  completedAt: Date.now(),
                 }
               : g,
           ),
@@ -517,6 +575,7 @@ function Workspace({
                   ...g,
                   status: data.status === "setup-needed" ? "setup-needed" : "failed",
                   message: data.message,
+                  completedAt: Date.now(),
                 }
               : g,
           ),
@@ -532,6 +591,7 @@ function Workspace({
                 status: "failed",
                 message:
                   error instanceof Error ? error.message : "Generation failed.",
+                completedAt: Date.now(),
               }
             : g,
         ),
@@ -617,7 +677,7 @@ function Workspace({
             promptRef={promptRef}
             assets={assets}
             uploads={uploads}
-            referencedAssets={referencedAssets}
+            generationReferences={generationReferences}
             onOpenFilePicker={() => fileInputRef.current?.click()}
             onRemoveAsset={hardDeleteAsset}
             deletingKeys={deleting}
@@ -631,7 +691,7 @@ function Workspace({
             settingsRef={settingsRef}
             canGenerate={canGenerate}
             generating={generating}
-            hintNeedsImage={hintNeedsImage}
+            generationHint={generationHint}
             onGenerate={generate}
             banner={banner}
             onDismissBanner={() => setBanner(null)}
@@ -953,14 +1013,15 @@ function EmptyState({
         <span className="micro-caps">Scene 01 · {projectName}</span>
       </div>
       <h2 className="serif-display text-5xl leading-[1.05] tracking-[-0.025em] sm:text-6xl">
-        Begin with an image.
+        Describe a shot.
         <br />
-        <span className="italic text-[var(--ink-muted)]">Describe the motion.</span>
+        <span className="italic text-[var(--ink-muted)]">Add references if needed.</span>
       </h2>
       <p className="max-w-[52ch] text-[15px] leading-relaxed text-[var(--ink-soft)]">
-        Drop a photograph anywhere on this page — still or video — then use{" "}
-        <span className="font-mono text-[13px]">@</span> in the composer below to
-        weave it into your prompt. Seedance will breathe motion into the frame.
+        Write a text prompt, or drop an image or video here and reference it
+        with <span className="font-mono text-[13px]">@</span>. If the prompt
+        says <span className="font-mono text-[13px]">this</span> after an upload,
+        the latest visual reference is used automatically.
       </p>
       <button
         type="button"
@@ -968,7 +1029,7 @@ function EmptyState({
         className="group mt-2 inline-flex items-center gap-3 text-sm text-[var(--ink)] underline decoration-[var(--accent)] decoration-2 underline-offset-[6px] hover:decoration-[var(--ink)]"
       >
         <Paperclip size={14} />
-        Upload an image to start
+        Upload a reference
       </button>
     </div>
   );
@@ -985,33 +1046,42 @@ function GenerationItem({
     .map((id) => assets.find((a) => a.id === id))
     .filter((a): a is ProjectAsset => Boolean(a));
 
+  const renderTime =
+    generation.completedAt && generation.status !== "generating"
+      ? formatDuration(generation.completedAt - generation.createdAt)
+      : null;
+
   return (
     <article className="slide-up">
       <header className="mb-3 flex items-baseline gap-3">
         <span className="micro-caps">Take · {formatTime(generation.createdAt)}</span>
         <span className="h-px flex-1 bg-[var(--rule)]" />
+        {renderTime ? (
+          <span className="flex items-center gap-1 font-mono text-[10.5px] tracking-wide text-[var(--ink-faint)]">
+            <Timer size={10} className="text-[var(--ink-faint)]" />
+            {renderTime}
+          </span>
+        ) : null}
       </header>
 
-      <div className="mb-4">
-        <p className="serif-display text-xl leading-[1.45] text-[var(--ink)] sm:text-2xl">
-          {renderPromptWithMentions(generation.prompt)}
-        </p>
-        {refs.length > 0 ? (
-          <div className="mt-3 flex flex-wrap gap-1.5">
-            {refs.map((r) => (
-              <AssetChip key={r.id} asset={r} small />
-            ))}
-          </div>
-        ) : null}
-      </div>
+      <CollapsiblePrompt prompt={generation.prompt} />
 
-      <div className="relative overflow-hidden rounded-[18px] border border-[var(--rule)] bg-[var(--ink)] shadow-[0_20px_60px_-30px_rgba(0,0,0,0.45)]">
+      {refs.length > 0 ? (
+        <div className="mt-3 flex flex-wrap gap-1.5">
+          {refs.map((r) => (
+            <AssetChip key={r.id} asset={r} small />
+          ))}
+        </div>
+      ) : null}
+
+      <div className="relative mt-4 overflow-hidden rounded-[18px] border border-[var(--rule)] bg-[var(--ink)] shadow-[0_20px_60px_-30px_rgba(0,0,0,0.45)]">
         {generation.status === "generating" ? (
           <GeneratingFilm />
         ) : generation.status === "ready" && generation.videoUrl ? (
           <VideoPreview
             videoUrl={generation.videoUrl}
             downloadUrl={generation.downloadUrl}
+            mediaType={generation.mediaType}
           />
         ) : (
           <ErrorState
@@ -1024,6 +1094,90 @@ function GenerationItem({
         )}
       </div>
     </article>
+  );
+}
+
+const COLLAPSED_PROMPT_HEIGHT = 168;
+
+function CollapsiblePrompt({ prompt }: { prompt: string }) {
+  const promptRef = useRef<HTMLParagraphElement>(null);
+  const [overflowing, setOverflowing] = useState(false);
+  const [expanded, setExpanded] = useState(false);
+  const [copied, setCopied] = useState(false);
+
+  useEffect(() => {
+    const el = promptRef.current;
+    if (!el) return;
+    const measure = () => {
+      setOverflowing(el.scrollHeight > COLLAPSED_PROMPT_HEIGHT + 4);
+    };
+    measure();
+    const observer = new ResizeObserver(measure);
+    observer.observe(el);
+    return () => observer.disconnect();
+  }, [prompt]);
+
+  const copy = async () => {
+    try {
+      await navigator.clipboard.writeText(prompt);
+      setCopied(true);
+      window.setTimeout(() => setCopied(false), 1400);
+    } catch {
+      // clipboard blocked — silently no-op
+    }
+  };
+
+  const collapsed = overflowing && !expanded;
+
+  return (
+    <div className="group/prompt relative">
+      <div
+        className="relative overflow-hidden transition-[max-height] duration-300 ease-out"
+        style={{
+          maxHeight: collapsed ? COLLAPSED_PROMPT_HEIGHT : 9999,
+        }}
+      >
+        <p
+          ref={promptRef}
+          className="serif-display text-xl leading-[1.45] text-[var(--ink)] sm:text-2xl"
+        >
+          {renderPromptWithMentions(prompt)}
+        </p>
+        {collapsed ? (
+          <div className="pointer-events-none absolute inset-x-0 bottom-0 h-16 bg-gradient-to-b from-transparent to-[var(--paper)]" />
+        ) : null}
+      </div>
+
+      <div className="mt-2 flex items-center gap-3 text-[11.5px] text-[var(--ink-muted)]">
+        {overflowing ? (
+          <button
+            type="button"
+            onClick={() => setExpanded((v) => !v)}
+            className="font-mono text-[11px] tracking-wide text-[var(--ink-soft)] underline decoration-[var(--rule-strong)] decoration-1 underline-offset-[5px] transition hover:text-[var(--ink)] hover:decoration-[var(--accent)]"
+          >
+            {expanded ? "Show less" : "Show more"}
+          </button>
+        ) : null}
+        <button
+          type="button"
+          onClick={copy}
+          aria-label={copied ? "Copied" : "Copy prompt"}
+          className="ml-auto flex items-center gap-1 rounded-full px-2 py-1 text-[var(--ink-faint)] opacity-60 transition hover:bg-[var(--paper-soft)] hover:text-[var(--ink-soft)] hover:opacity-100 group-hover/prompt:opacity-100"
+        >
+          {copied ? (
+            <>
+              <Check size={11} className="text-[var(--accent-ink)]" />
+              <span className="font-mono text-[10.5px] tracking-wide">copied</span>
+            </>
+          ) : (
+            <>
+              <Copy size={11} />
+              <span className="font-mono text-[10.5px] tracking-wide">copy</span>
+            </>
+          )}
+        </button>
+      </div>
+    </div>
   );
 }
 
@@ -1062,10 +1216,57 @@ function GeneratingFilm() {
 function VideoPreview({
   videoUrl,
   downloadUrl,
+  mediaType,
 }: {
   videoUrl: string;
   downloadUrl?: string;
+  mediaType?: string;
 }) {
+  const sourceUrl = downloadUrl ?? videoUrl;
+  const extension = extensionForVideo(sourceUrl, mediaType);
+  const filename = `seedance-output.${extension}`;
+  const downloadHref = `/api/video/download?url=${encodeURIComponent(
+    sourceUrl,
+  )}&filename=${encodeURIComponent(filename)}`;
+  const [downloading, setDownloading] = useState(false);
+  const [downloadError, setDownloadError] = useState<string | null>(null);
+
+  const downloadVideo = async () => {
+    if (downloading) return;
+    setDownloading(true);
+    setDownloadError(null);
+
+    try {
+      const response = await fetch(downloadHref, { cache: "no-store" });
+      if (!response.ok) {
+        let message = "Download failed.";
+        try {
+          const data = (await response.json()) as { message?: unknown };
+          if (typeof data.message === "string") message = data.message;
+        } catch {
+          message = response.statusText || message;
+        }
+        throw new Error(message);
+      }
+
+      const blob = await response.blob();
+      const objectUrl = URL.createObjectURL(blob);
+      const anchor = document.createElement("a");
+      anchor.href = objectUrl;
+      anchor.download = filename;
+      document.body.append(anchor);
+      anchor.click();
+      anchor.remove();
+      window.setTimeout(() => URL.revokeObjectURL(objectUrl), 0);
+    } catch (error) {
+      setDownloadError(
+        error instanceof Error ? error.message : "Download failed.",
+      );
+    } finally {
+      setDownloading(false);
+    }
+  };
+
   return (
     <div className="group relative">
       <video
@@ -1073,18 +1274,44 @@ function VideoPreview({
         controls
         className="aspect-video w-full"
       />
-      <div className="absolute right-3 top-3 flex items-center gap-1 opacity-0 transition group-hover:opacity-100">
-        <a
-          href={downloadUrl ?? videoUrl}
-          download="seedance-output.mp4"
-          className="flex h-8 items-center gap-1.5 rounded-full bg-[var(--paper)]/95 px-3 text-xs font-medium text-[var(--ink)] shadow-lg hover:bg-[var(--paper)]"
+      <div className="absolute right-3 top-3 flex items-center gap-1 opacity-0 transition group-hover:opacity-100 group-focus-within:opacity-100">
+        <button
+          type="button"
+          onClick={downloadVideo}
+          disabled={downloading}
+          className="flex h-8 items-center gap-1.5 rounded-full bg-[var(--paper)]/95 px-3 text-xs font-medium text-[var(--ink)] shadow-lg ring-1 ring-black/5 hover:bg-[var(--paper)] disabled:cursor-wait disabled:opacity-70"
         >
-          <Download size={13} />
-          Download
-        </a>
+          {downloading ? (
+            <Loader2 size={13} className="animate-spin" />
+          ) : (
+            <Download size={13} />
+          )}
+          {downloading ? "Saving" : "Download"}
+        </button>
       </div>
+      {downloadError ? (
+        <div className="absolute bottom-3 left-3 right-3 rounded bg-red-950/90 px-3 py-2 text-xs text-white shadow-lg">
+          {downloadError}
+        </div>
+      ) : null}
     </div>
   );
+}
+
+function extensionForVideo(url: string, mediaType?: string) {
+  const normalizedMediaType = mediaType?.toLowerCase() ?? "";
+  if (normalizedMediaType.includes("webm")) return "webm";
+  if (normalizedMediaType.includes("quicktime")) return "mov";
+  if (normalizedMediaType.includes("x-matroska")) return "mkv";
+  if (normalizedMediaType.includes("mp4") || normalizedMediaType.includes("mpeg4")) {
+    return "mp4";
+  }
+
+  const pathname = new URL(url, window.location.href).pathname.toLowerCase();
+  if (pathname.endsWith(".webm")) return "webm";
+  if (pathname.endsWith(".mov")) return "mov";
+  if (pathname.endsWith(".mkv")) return "mkv";
+  return "mp4";
 }
 
 function ErrorState({
@@ -1143,7 +1370,7 @@ function Composer({
   promptRef,
   assets,
   uploads,
-  referencedAssets,
+  generationReferences,
   onOpenFilePicker,
   onRemoveAsset,
   deletingKeys,
@@ -1157,7 +1384,7 @@ function Composer({
   settingsRef,
   canGenerate,
   generating,
-  hintNeedsImage,
+  generationHint,
   onGenerate,
   banner,
   onDismissBanner,
@@ -1169,7 +1396,7 @@ function Composer({
   promptRef: React.RefObject<HTMLTextAreaElement | null>;
   assets: ProjectAsset[];
   uploads: UploadItem[];
-  referencedAssets: ProjectAsset[];
+  generationReferences: ProjectAsset[];
   onOpenFilePicker: () => void;
   onRemoveAsset: (asset: ProjectAsset) => void;
   deletingKeys: Set<string>;
@@ -1183,7 +1410,7 @@ function Composer({
   settingsRef: React.RefObject<HTMLDivElement | null>;
   canGenerate: boolean;
   generating: boolean;
-  hintNeedsImage: boolean;
+  generationHint: string | null;
   onGenerate: () => void;
   banner: string | null;
   onDismissBanner: () => void;
@@ -1216,7 +1443,7 @@ function Composer({
           {hasAssets ? (
             <div className="flex flex-wrap items-center gap-1.5 border-b border-[var(--rule)] px-4 pb-2 pt-3">
               {assets.map((asset) => {
-                const referenced = referencedAssets.some(
+                const referenced = generationReferences.some(
                   (r) => r.id === asset.id,
                 );
                 return (
@@ -1238,23 +1465,14 @@ function Composer({
 
           {/* Prompt area */}
           <div className="relative">
-            <textarea
-              ref={promptRef}
+            <AutoGrowTextarea
+              promptRef={promptRef}
               value={prompt}
-              onChange={(e) => onPromptChange(e.target.value, e.target.selectionStart)}
+              onChange={(value, caret) => onPromptChange(value, caret)}
               onClick={syncCaret}
               onKeyUp={syncCaret}
               onSelect={syncCaret}
               onKeyDown={onKeyDown}
-              rows={1}
-              placeholder="Describe the motion… use @ to reference an asset."
-              className="max-h-56 min-h-[60px] w-full resize-none bg-transparent px-5 pb-2 pt-4 text-[15.5px] leading-relaxed text-[var(--ink)] outline-none placeholder:text-[var(--ink-faint)]"
-              style={{
-                height: Math.min(
-                  224,
-                  Math.max(60, 24 + prompt.split("\n").length * 22),
-                ),
-              }}
             />
 
             {mentionMatches.length > 0 && mentionQuery !== null ? (
@@ -1277,7 +1495,7 @@ function Composer({
                 <ToolbarButton
                   onClick={() => setSettingsOpen(!settingsOpen)}
                   icon={<Settings2 size={14} />}
-                  label={`${settings.model.endsWith("fast") ? "Fast" : "Standard"} · ${settings.aspectRatio} · ${settings.resolution} · ${settings.duration}s`}
+                  label={`${settings.model.endsWith("fast") ? "Fast" : "Standard"} · ${formatSeedanceAspectRatio(settings.aspectRatio)} · ${settings.resolution} · ${formatSeedanceDuration(settings.duration)}`}
                   active={settingsOpen}
                 />
                 {settingsOpen ? (
@@ -1287,9 +1505,9 @@ function Composer({
                   />
                 ) : null}
               </div>
-              {hintNeedsImage ? (
+              {generationHint ? (
                 <span className="ml-1 hidden items-center gap-1 text-[11px] italic text-[var(--ink-muted)] sm:flex">
-                  <AtSign size={11} /> reference an image to generate
+                  <AtSign size={11} /> {generationHint}
                 </span>
               ) : null}
             </div>
@@ -1326,6 +1544,58 @@ function Composer({
         </p>
       </div>
     </div>
+  );
+}
+
+const COMPOSER_MIN_HEIGHT = 60;
+const COMPOSER_MAX_HEIGHT = 320;
+
+function AutoGrowTextarea({
+  promptRef,
+  value,
+  onChange,
+  onClick,
+  onKeyUp,
+  onSelect,
+  onKeyDown,
+}: {
+  promptRef: React.RefObject<HTMLTextAreaElement | null>;
+  value: string;
+  onChange: (value: string, caret: number) => void;
+  onClick: () => void;
+  onKeyUp: () => void;
+  onSelect: () => void;
+  onKeyDown: (event: KeyboardEvent<HTMLTextAreaElement>) => void;
+}) {
+  useEffect(() => {
+    const el = promptRef.current;
+    if (!el) return;
+    el.style.height = "auto";
+    const next = Math.min(
+      COMPOSER_MAX_HEIGHT,
+      Math.max(COMPOSER_MIN_HEIGHT, el.scrollHeight),
+    );
+    el.style.height = `${next}px`;
+    el.style.overflowY = el.scrollHeight > COMPOSER_MAX_HEIGHT ? "auto" : "hidden";
+  }, [value, promptRef]);
+
+  return (
+    <textarea
+      ref={promptRef}
+      value={value}
+      onChange={(e) => onChange(e.target.value, e.target.selectionStart)}
+      onClick={onClick}
+      onKeyUp={onKeyUp}
+      onSelect={onSelect}
+      onKeyDown={onKeyDown}
+      rows={1}
+      placeholder="Describe the motion… use @ to reference an asset."
+      className="w-full resize-none bg-transparent px-5 pb-2 pt-4 text-[15.5px] leading-relaxed text-[var(--ink)] outline-none placeholder:text-[var(--ink-faint)]"
+      style={{
+        minHeight: COMPOSER_MIN_HEIGHT,
+        maxHeight: COMPOSER_MAX_HEIGHT,
+      }}
+    />
   );
 }
 
@@ -1509,6 +1779,12 @@ function SettingsPopover({
   settings: Settings;
   onUpdate: (partial: Partial<Settings>) => void;
 }) {
+  const smartDuration = settings.duration === seedanceDuration.smart;
+  const durationValue = smartDuration
+    ? seedanceDuration.default
+    : settings.duration;
+  const resolutionOptions = getSeedanceResolutionOptions(settings.model);
+
   return (
     <div className="absolute bottom-full left-0 z-30 mb-2 w-[340px] overflow-hidden rounded-[14px] border border-[var(--rule)] bg-[var(--paper)] shadow-[0_20px_50px_-20px_rgba(0,0,0,0.3)] slide-up">
       <div className="border-b border-[var(--rule)] px-4 py-3">
@@ -1519,10 +1795,7 @@ function SettingsPopover({
           label="Model"
           value={settings.model}
           onChange={(v) => onUpdate({ model: v as Settings["model"] })}
-          options={[
-            { value: "bytedance/seedance-2.0", label: "Standard" },
-            { value: "bytedance/seedance-2.0-fast", label: "Fast" },
-          ]}
+          options={seedanceModelOptions}
         />
         <SegmentedRow
           label="Aspect"
@@ -1530,13 +1803,7 @@ function SettingsPopover({
           onChange={(v) =>
             onUpdate({ aspectRatio: v as Settings["aspectRatio"] })
           }
-          options={[
-            { value: "16:9", label: "16:9" },
-            { value: "9:16", label: "9:16" },
-            { value: "1:1", label: "1:1" },
-            { value: "4:3", label: "4:3" },
-            { value: "3:4", label: "3:4" },
-          ]}
+          options={seedanceAspectRatioOptions}
         />
         <SegmentedRow
           label="Resolution"
@@ -1544,25 +1811,39 @@ function SettingsPopover({
           onChange={(v) =>
             onUpdate({ resolution: v as Settings["resolution"] })
           }
-          options={[
-            { value: "480p", label: "480" },
-            { value: "720p", label: "720" },
-            { value: "1080p", label: "1080" },
-          ]}
+          options={resolutionOptions}
         />
         <div className="flex items-center justify-between gap-3">
           <span className="text-xs text-[var(--ink-muted)]">Duration</span>
           <div className="flex items-center gap-2">
+            <button
+              type="button"
+              onClick={() =>
+                onUpdate({
+                  duration: smartDuration
+                    ? seedanceDuration.default
+                    : seedanceDuration.smart,
+                })
+              }
+              className={`rounded-full border px-2 py-1 text-[11px] font-medium transition ${
+                smartDuration
+                  ? "border-[var(--rule-strong)] bg-[var(--paper)] text-[var(--ink)] shadow-[0_1px_2px_rgba(0,0,0,0.06)]"
+                  : "border-[var(--rule)] bg-[var(--paper-soft)] text-[var(--ink-muted)] hover:text-[var(--ink)]"
+              }`}
+            >
+              Auto
+            </button>
             <input
               type="range"
-              min={4}
-              max={12}
-              value={settings.duration}
+              min={seedanceDuration.min}
+              max={seedanceDuration.max}
+              value={durationValue}
+              disabled={smartDuration}
               onChange={(e) => onUpdate({ duration: Number(e.target.value) })}
-              className="h-1 w-[140px] appearance-none rounded-full bg-[var(--paper-deep)] accent-[var(--accent-ink)]"
+              className="h-1 w-[116px] appearance-none rounded-full bg-[var(--paper-deep)] accent-[var(--accent-ink)] disabled:opacity-45"
             />
-            <span className="w-8 text-right font-mono text-[11.5px] text-[var(--ink)]">
-              {settings.duration}s
+            <span className="w-9 text-right font-mono text-[11.5px] text-[var(--ink)]">
+              {formatSeedanceDuration(settings.duration)}
             </span>
           </div>
         </div>
@@ -1571,11 +1852,6 @@ function SettingsPopover({
             label="Audio"
             checked={settings.generateAudio}
             onChange={(v) => onUpdate({ generateAudio: v })}
-          />
-          <Toggle
-            label="Fixed camera"
-            checked={settings.cameraFixed}
-            onChange={(v) => onUpdate({ cameraFixed: v })}
           />
         </div>
       </div>
@@ -1592,21 +1868,21 @@ function SegmentedRow({
   label: string;
   value: string;
   onChange: (value: string) => void;
-  options: { value: string; label: string }[];
+  options: readonly { value: string; label: string }[];
 }) {
   return (
     <div className="flex items-center justify-between gap-3">
       <span className="text-xs text-[var(--ink-muted)]">{label}</span>
-      <div className="inline-flex overflow-hidden rounded-full border border-[var(--rule)] bg-[var(--paper-soft)] p-0.5">
+      <div className="flex max-w-[236px] flex-wrap justify-end gap-1">
         {options.map((opt) => (
           <button
             key={opt.value}
             type="button"
             onClick={() => onChange(opt.value)}
-            className={`px-2.5 py-1 text-[11.5px] font-medium transition ${
+            className={`rounded-full border px-2.5 py-1 text-[11.5px] font-medium transition ${
               value === opt.value
-                ? "rounded-full bg-[var(--paper)] text-[var(--ink)] shadow-[0_1px_2px_rgba(0,0,0,0.06)]"
-                : "text-[var(--ink-muted)] hover:text-[var(--ink)]"
+                ? "border-[var(--rule-strong)] bg-[var(--paper)] text-[var(--ink)] shadow-[0_1px_2px_rgba(0,0,0,0.06)]"
+                : "border-[var(--rule)] bg-[var(--paper-soft)] text-[var(--ink-muted)] hover:text-[var(--ink)]"
             }`}
           >
             {opt.label}

@@ -9,23 +9,12 @@ import {
   getMissingR2Env,
   uploadObjectToR2,
 } from "@/lib/storage/r2";
+import { sanitizeVideoSettings } from "@/lib/video-options";
 
 export const runtime = "nodejs";
 export const maxDuration = 600;
 
 type AssetKind = "image" | "video" | "audio";
-type SeedanceModel = "bytedance/seedance-2.0" | "bytedance/seedance-2.0-fast";
-type AspectRatio = "16:9" | "9:16" | "1:1" | "4:3" | "3:4";
-type Resolution = "480p" | "720p" | "1080p";
-
-type Settings = {
-  model: SeedanceModel;
-  aspectRatio: AspectRatio;
-  resolution: Resolution;
-  duration: number;
-  generateAudio: boolean;
-  cameraFixed: boolean;
-};
 
 type ReferenceInput = {
   handle: string;
@@ -36,27 +25,6 @@ type ReferenceInput = {
 
 type ProviderJsonObject = Record<string, JSONValue | undefined>;
 
-const defaultSettings: Settings = {
-  model: "bytedance/seedance-2.0",
-  aspectRatio: "16:9",
-  resolution: "720p",
-  duration: 8,
-  generateAudio: true,
-  cameraFixed: false,
-};
-
-const allowedModels = new Set<SeedanceModel>([
-  "bytedance/seedance-2.0",
-  "bytedance/seedance-2.0-fast",
-]);
-const allowedAspectRatios = new Set<AspectRatio>([
-  "16:9",
-  "9:16",
-  "1:1",
-  "4:3",
-  "3:4",
-]);
-const allowedResolutions = new Set<Resolution>(["480p", "720p", "1080p"]);
 const allowedKinds = new Set<AssetKind>(["image", "video", "audio"]);
 
 function setupNeeded(message: string) {
@@ -67,30 +35,13 @@ function failed(message: string, status = 400) {
   return NextResponse.json({ status: "failed", message }, { status });
 }
 
-function sanitizeSettings(value: unknown): Settings {
-  if (!value || typeof value !== "object") return defaultSettings;
-  const parsed = value as Partial<Settings>;
-  const duration = Number(parsed.duration);
-
-  return {
-    model:
-      parsed.model && allowedModels.has(parsed.model)
-        ? parsed.model
-        : defaultSettings.model,
-    aspectRatio:
-      parsed.aspectRatio && allowedAspectRatios.has(parsed.aspectRatio)
-        ? parsed.aspectRatio
-        : defaultSettings.aspectRatio,
-    resolution:
-      parsed.resolution && allowedResolutions.has(parsed.resolution)
-        ? parsed.resolution
-        : defaultSettings.resolution,
-    duration: Number.isFinite(duration)
-      ? Math.min(12, Math.max(4, duration))
-      : defaultSettings.duration,
-    generateAudio: parsed.generateAudio ?? defaultSettings.generateAudio,
-    cameraFixed: parsed.cameraFixed ?? defaultSettings.cameraFixed,
-  };
+function extensionForMediaType(mediaType: string | undefined) {
+  const normalized = mediaType?.toLowerCase() ?? "";
+  if (normalized.includes("webm")) return "webm";
+  if (normalized.includes("quicktime")) return "mov";
+  if (normalized.includes("x-matroska")) return "mkv";
+  if (normalized.includes("mp4") || normalized.includes("mpeg4")) return "mp4";
+  return "mp4";
 }
 
 function sanitizeReferences(value: unknown): ReferenceInput[] {
@@ -114,19 +65,36 @@ function escapeRegExp(value: string) {
   return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
+function referenceLabel(reference: ReferenceInput, counters: Record<AssetKind, number>) {
+  counters[reference.kind] += 1;
+  return reference.kind === "image"
+    ? `[Image ${counters.image}]`
+    : reference.kind === "video"
+      ? `[Video ${counters.video}]`
+      : `[Audio ${counters.audio}]`;
+}
+
 function normalizePrompt(prompt: string, references: ReferenceInput[]) {
   const counters: Record<AssetKind, number> = { image: 0, video: 0, audio: 0 };
-  return references.reduce((current, reference) => {
-    counters[reference.kind] += 1;
-    const label =
-      reference.kind === "image"
-        ? `[Image ${counters.image}]`
-        : reference.kind === "video"
-          ? `[Video ${counters.video}]`
-          : `[Audio ${counters.audio}]`;
+  let insertedReference = false;
+  const normalized = references.reduce((current, reference) => {
+    const label = referenceLabel(reference, counters);
     const pattern = new RegExp(`@${escapeRegExp(reference.handle)}\\b`, "gi");
+    if (pattern.test(current)) insertedReference = true;
     return current.replace(pattern, label);
   }, prompt);
+
+  if (insertedReference || references.length === 0) return normalized;
+
+  const fallbackCounters: Record<AssetKind, number> = {
+    image: 0,
+    video: 0,
+    audio: 0,
+  };
+  const labels = references.map((reference) =>
+    referenceLabel(reference, fallbackCounters),
+  );
+  return `${normalized}\n\nUse ${labels.join(", ")} as reference material.`;
 }
 
 function hasGatewayAuth() {
@@ -151,7 +119,7 @@ export async function POST(request: Request) {
 
   const body = payload as Record<string, unknown>;
   const prompt = typeof body.prompt === "string" ? body.prompt.trim() : "";
-  const settings = sanitizeSettings(body.settings);
+  const settings = sanitizeVideoSettings(body.settings);
   const references = sanitizeReferences(body.references);
   const scope = {
     tenantId:
@@ -176,10 +144,6 @@ export async function POST(request: Request) {
   const videoReferences = references.filter((r) => r.kind === "video");
   const sourceImage = imageReferences[0];
 
-  if (!sourceImage) {
-    return failed("At least one image reference is required.");
-  }
-
   if (!hasGatewayAuth()) {
     return setupNeeded(
       "Connect Vercel AI Gateway first. Add AI_GATEWAY_API_KEY locally, or deploy on Vercel with OIDC enabled.",
@@ -197,8 +161,6 @@ export async function POST(request: Request) {
     const normalizedPrompt = normalizePrompt(prompt, references);
     const bytedanceOptions: ProviderJsonObject = {
       generateAudio: settings.generateAudio,
-      cameraFixed: settings.cameraFixed,
-      watermark: false,
       pollTimeoutMs: 600000,
     };
 
@@ -217,14 +179,21 @@ export async function POST(request: Request) {
       bytedance: bytedanceOptions,
     };
 
+    const aspectRatio =
+      !sourceImage && settings.aspectRatio === "adaptive"
+        ? "16:9"
+        : settings.aspectRatio;
+
     const result = await generateVideo({
       model: gateway.video(settings.model),
-      prompt: {
-        image: sourceImage.url,
-        text: normalizedPrompt,
-      },
-      aspectRatio: settings.aspectRatio,
-      resolution: settings.resolution as `${number}x${number}`,
+      // Seedance 2.0 image prompt objects currently hit a Gateway/provider
+      // content-role validation path. Reference inputs use the documented
+      // string prompt + providerOptions shape and support image/video refs.
+      prompt: normalizedPrompt,
+      // Seedance 2.0 accepts p-style quality values and adaptive aspect ratio
+      // upstream. ai@6.0.168 types are narrower, but forwards strings unchanged.
+      aspectRatio: aspectRatio as unknown as `${number}:${number}`,
+      resolution: settings.resolution as unknown as `${number}x${number}`,
       duration: settings.duration,
       providerOptions,
       abortSignal: AbortSignal.timeout(600000),
@@ -234,7 +203,8 @@ export async function POST(request: Request) {
       return failed("The model did not return a video.", 502);
     }
 
-    const extension = video.mediaType.includes("webm") ? "webm" : "mp4";
+    const mediaType = video.mediaType || "video/mp4";
+    const extension = extensionForMediaType(mediaType);
     const output = await uploadObjectToR2({
       key: createStorageKey({
         ...scope,
@@ -242,7 +212,7 @@ export async function POST(request: Request) {
         filename: `seedance-output.${extension}`,
       }),
       body: Buffer.from(video.uint8Array),
-      contentType: video.mediaType || "video/mp4",
+      contentType: mediaType,
     });
 
     return NextResponse.json({
@@ -250,8 +220,9 @@ export async function POST(request: Request) {
       model: settings.model,
       videoUrl: output.url,
       downloadUrl: output.downloadUrl,
+      mediaType,
       storageKey: output.key,
-      sourceImageUrl: sourceImage.url,
+      sourceImageUrl: sourceImage?.url,
     });
   } catch (error) {
     return failed(
